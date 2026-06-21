@@ -19,6 +19,16 @@ type PublisherConfig struct {
 	// ProjectID is an ID of a Google Cloud project with Firestore database.
 	ProjectID string
 
+	// Database is the name of the Firestore database to use.
+	//
+	// When empty, the default database "(default)" is used via
+	// firestore.NewClient. When non-empty, the client is created via
+	// firestore.NewClientWithDatabase so a named database (for example
+	// "main") can be selected.
+	//
+	// Ignored when FirestoreClient is set.
+	Database string
+
 	// PubSubRootCollection is a name of a collection which will be used as a root collection for the PubSub.
 	// It defaults to "pubsub".
 	PubSubRootCollection string
@@ -46,7 +56,20 @@ type PublisherConfig struct {
 	// Marshaler marshals message from Watermill to Firestore format and vice versa.
 	Marshaler Marshaler
 
-	// CustomFirestoreClient can be used to override a default client.
+	// FirestoreClient can be used to inject a pre-built *firestore.Client.
+	//
+	// When set, the publisher uses it directly and does NOT create its own
+	// client (ProjectID, Database and GoogleClientOpts are ignored for client
+	// construction). This is the recommended way to share a single, possibly
+	// instrumented (for example OpenTelemetry) and/or named-database client
+	// across publishers, subscribers and your own transactions. It is required
+	// when using PublishInTransaction with a *firestore.Transaction that
+	// originates from your own client.
+	FirestoreClient *firestore.Client
+
+	// CustomFirestoreClient can be used to override a default client with any
+	// implementation of the internal client interface. Prefer FirestoreClient
+	// for the common case of injecting a *firestore.Client.
 	CustomFirestoreClient client
 }
 
@@ -83,15 +106,15 @@ type subscriptionsCacheEntry struct {
 func NewPublisher(config PublisherConfig, logger watermill.LoggerAdapter) (*Publisher, error) {
 	config.setDefaults()
 
-	var client client
-	if config.CustomFirestoreClient != nil {
-		client = config.CustomFirestoreClient
-	} else {
-		var err error
-		client, err = firestore.NewClient(context.Background(), config.ProjectID, config.GoogleClientOpts...)
-		if err != nil {
-			return nil, errors.Wrap(err, "cannot create default firestore client")
-		}
+	client, err := resolveClient(
+		config.CustomFirestoreClient,
+		config.FirestoreClient,
+		config.ProjectID,
+		config.Database,
+		config.GoogleClientOpts,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Publisher{
