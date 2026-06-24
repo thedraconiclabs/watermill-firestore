@@ -71,6 +71,15 @@ type PublisherConfig struct {
 	// implementation of the internal client interface. Prefer FirestoreClient
 	// for the common case of injecting a *firestore.Client.
 	CustomFirestoreClient client
+
+	// DefaultSubscription, when set, makes Publish and PublishInTransaction write a
+	// single message document under this subscription name for a topic that has no
+	// registered subscriptions, instead of dropping the message. This suits an
+	// outbox where an external relay (not a Watermill subscriber) drains the
+	// documents, so no SubscribeInitialize call is required to register a
+	// subscription up front. When empty (the default) behavior is unchanged: a
+	// topic with no subscriptions receives no documents.
+	DefaultSubscription string
 }
 
 func (c *PublisherConfig) setDefaults() {
@@ -137,6 +146,7 @@ func (p *Publisher) Publish(topic string, messages ...*message.Message) error {
 		logger.Error("Failed to get subscriptions for publishing", err, nil)
 		return err
 	}
+	subscriptions = p.withDefaultSubscription(subscriptions)
 	logger = logger.With(watermill.LogFields{"subscriptions_count": len(subscriptions)})
 
 	msgsToPublish, err := p.prepareFirestoreMessages(messages)
@@ -170,6 +180,7 @@ func (p *Publisher) PublishInTransaction(topic string, t *firestore.Transaction,
 		logger.Error("Failed to get subscriptions for publishing", err, nil)
 		return err
 	}
+	subscriptions = p.withDefaultSubscription(subscriptions)
 	logger = logger.With(watermill.LogFields{"subscriptions_count": len(subscriptions)})
 
 	marshaledMessages, err := p.prepareFirestoreMessages(messages)
@@ -201,6 +212,18 @@ func (p *Publisher) PublishInTransaction(topic string, t *firestore.Transaction,
 	}
 
 	return nil
+}
+
+// withDefaultSubscription returns subscriptions unchanged, or a single
+// DefaultSubscription entry when the topic has none registered and a default is
+// configured, so the message is written under that subscription instead of being
+// dropped.
+func (p *Publisher) withDefaultSubscription(subscriptions []string) []string {
+	if len(subscriptions) == 0 && p.config.DefaultSubscription != "" {
+		return []string{p.config.DefaultSubscription}
+	}
+
+	return subscriptions
 }
 
 func (p *Publisher) getSubscriptions(ctx context.Context, topic string) ([]string, error) {
